@@ -11,8 +11,7 @@ const inter = Inter({
 
 export const metadata: Metadata = {
   title: "Next.js Better Auth Monolith",
-  description:
-    "Production-ready skeletal Next.js monolith template powered by Better Auth and Prisma",
+  description: "Skeletal Next.js monolith auth starter powered by Better Auth and Prisma",
 };
 
 export default function RootLayout({
