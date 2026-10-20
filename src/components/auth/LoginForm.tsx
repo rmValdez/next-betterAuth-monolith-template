@@ -1,9 +1,10 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
-import { LogIn, UserPlus, ShieldCheck, AlertCircle, Eye, EyeOff } from "lucide-react";
+import { LogIn, UserPlus, ShieldCheck, AlertCircle, Eye, EyeOff, MailCheck } from "lucide-react";
 import { toast } from "sonner";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
@@ -12,6 +13,8 @@ import { authClient } from "@/lib/auth-client";
 import { isValidEmail } from "@/lib/utils";
 import { MIN_PASSWORD_LENGTH } from "@/lib/config";
 import { AUTH_SESSION_QUERY_KEY } from "@/hooks/useAuthSession";
+
+const EMAIL_VERIFIED_PATH = "/email-verified";
 
 export function LoginForm() {
   const router = useRouter();
@@ -23,6 +26,12 @@ export function LoginForm() {
   const [error, setError] = useState<string | null>(null);
   const [isPending, setIsPending] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
+  // Set once sign-up succeeds: the account exists but has no session until the
+  // email is verified (requireEmailVerification in src/lib/auth.ts).
+  const [verificationSentTo, setVerificationSentTo] = useState<string | null>(null);
+  // Set when sign-in is refused because the address is not yet verified.
+  const [unverifiedEmail, setUnverifiedEmail] = useState<string | null>(null);
+  const [isResending, setIsResending] = useState(false);
 
   const switchMode = (nextMode: "signin" | "signup") => {
     setMode(nextMode);
@@ -31,11 +40,32 @@ export function LoginForm() {
     setPassword("");
     setName("");
     setShowPassword(false);
+    setUnverifiedEmail(null);
+  };
+
+  const resendVerification = async (address: string) => {
+    setIsResending(true);
+    try {
+      const { error: resendError } = await authClient.sendVerificationEmail({
+        email: address,
+        callbackURL: EMAIL_VERIFIED_PATH,
+      });
+
+      if (resendError) {
+        toast.error(resendError.message || "Could not send verification email.");
+        return;
+      }
+
+      toast.success("Verification email sent. Check your inbox.");
+    } finally {
+      setIsResending(false);
+    }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+    setUnverifiedEmail(null);
 
     if (!isValidEmail(email)) {
       setError("Please enter a valid email address.");
@@ -51,14 +81,22 @@ export function LoginForm() {
 
     try {
       if (mode === "signup") {
-        const { error: signUpError } = await authClient.signUp.email({
+        const { data, error: signUpError } = await authClient.signUp.email({
           email,
           password,
           name: name.trim() || email.split("@")[0] || "User",
+          callbackURL: EMAIL_VERIFIED_PATH,
         });
 
         if (signUpError) {
           setError(signUpError.message || "Failed to create account.");
+          return;
+        }
+
+        // No session token means verification is required before sign-in.
+        if (!data?.token) {
+          setVerificationSentTo(email);
+          setPassword("");
           return;
         }
       } else {
@@ -68,7 +106,12 @@ export function LoginForm() {
         });
 
         if (signInError) {
-          setError(signInError.message || "Invalid credentials.");
+          if (signInError.code === "EMAIL_NOT_VERIFIED") {
+            setUnverifiedEmail(email);
+            setError("Your email address has not been verified yet.");
+          } else {
+            setError(signInError.message || "Invalid credentials.");
+          }
           return;
         }
       }
@@ -83,6 +126,50 @@ export function LoginForm() {
       setIsPending(false);
     }
   };
+
+  if (verificationSentTo) {
+    return (
+      <Card className="w-full max-w-md border-slate-800 bg-slate-900/80 backdrop-blur-xl">
+        <div className="flex flex-col items-center text-center">
+          <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-2xl border border-cyan-500/20 bg-cyan-500/10 text-cyan-400 shadow-inner">
+            <MailCheck className="h-6 w-6" />
+          </div>
+          <h1 className="text-xl font-bold tracking-tight text-white">Check your email</h1>
+          <p className="mt-2 text-sm text-slate-400">
+            We sent a verification link to{" "}
+            <span className="font-medium text-slate-200">{verificationSentTo}</span>. Open it to
+            activate your account — you&apos;ll be signed in automatically.
+          </p>
+          <p className="mt-2 text-xs text-slate-500">
+            Running locally? The link is printed in the dev server console.
+          </p>
+        </div>
+
+        <div className="mt-6 space-y-3">
+          <Button
+            type="button"
+            variant="outline"
+            fullWidth
+            isLoading={isResending}
+            onClick={() => resendVerification(verificationSentTo)}
+          >
+            Resend verification email
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            fullWidth
+            onClick={() => {
+              setVerificationSentTo(null);
+              switchMode("signin");
+            }}
+          >
+            Back to sign in
+          </Button>
+        </div>
+      </Card>
+    );
+  }
 
   return (
     <Card className="w-full max-w-md border-slate-800 bg-slate-900/80 backdrop-blur-xl">
@@ -128,7 +215,19 @@ export function LoginForm() {
       {error && (
         <div className="animate-in fade-in mb-4 flex items-start gap-2.5 rounded-xl border border-red-500/20 bg-red-500/10 p-3 text-xs text-red-400 duration-200">
           <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
-          <span>{error}</span>
+          <div className="space-y-1.5">
+            <span>{error}</span>
+            {unverifiedEmail && (
+              <button
+                type="button"
+                onClick={() => resendVerification(unverifiedEmail)}
+                disabled={isResending}
+                className="block font-semibold text-cyan-400 underline-offset-2 hover:underline disabled:opacity-50"
+              >
+                {isResending ? "Sending..." : "Resend verification email"}
+              </button>
+            )}
+          </div>
         </div>
       )}
 
@@ -174,6 +273,17 @@ export function LoginForm() {
             {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
           </button>
         </div>
+
+        {mode === "signin" && (
+          <div className="flex justify-end">
+            <Link
+              href="/forgot-password"
+              className="text-xs text-slate-400 transition-colors hover:text-cyan-400"
+            >
+              Forgot password?
+            </Link>
+          </div>
+        )}
 
         <Button type="submit" fullWidth isLoading={isPending} className="mt-6">
           {mode === "signin" ? "Sign In" : "Create Account"}

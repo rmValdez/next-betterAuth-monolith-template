@@ -47,8 +47,7 @@ export default function LandingPage() {
 
         <div className="mx-auto max-w-4xl space-y-6">
           <div className="inline-flex items-center gap-2 rounded-full border border-cyan-500/30 bg-cyan-950/40 px-3.5 py-1.5 text-xs font-medium text-cyan-300">
-            <Zap className="h-3.5 w-3.5 text-cyan-400" /> Production-Grade Next.js 15 Monolith
-            Template
+            <Zap className="h-3.5 w-3.5 text-cyan-400" /> Next.js 15 Monolith Auth Starter
           </div>
 
           <h1 className="text-4xl font-extrabold leading-tight tracking-tight text-white sm:text-6xl md:text-7xl">

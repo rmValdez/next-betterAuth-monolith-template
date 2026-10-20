@@ -1,6 +1,6 @@
 # System Architecture & Technical Specification
 
-`next-betterAuth-monolith-template` is a modular, production-ready monolithic template built with **Next.js 15 (App Router)**, **Better Auth**, and **Prisma ORM (PostgreSQL)**.
+`next-betterAuth-monolith-template` is a modular monolithic auth starter built with **Next.js 15 (App Router)**, **Better Auth**, and **Prisma ORM (PostgreSQL)**.
 
 ---
 
@@ -13,11 +13,13 @@ graph TD
     subgraph NextJS["Next.js 15 Monolith (App Router)"]
         Landing["Landing Page (/)<br/>Server Component"]
         LoginUI["Auth View (/login)<br/>LoginForm (Client Component)"]
+        RecoveryUI["/forgot-password, /reset-password,<br/>/email-verified"]
         DashboardUI["Dashboard (/dashboard)<br/>Protected Layout Guard"]
 
         subgraph AuthLayer["Better Auth Engine"]
             APIHandler["/api/auth/[...all]<br/>Next.js Route Handler"]
-            AuthLib["Better Auth Core Engine<br/>src/lib/auth.ts"]
+            AuthLib["Better Auth Core Engine<br/>src/lib/auth.ts<br/>(rate limiter built in)"]
+            Mailer["sendEmail()<br/>src/lib/email.ts<br/>(dev: server console)"]
             AuthClient["Better Auth React Client<br/>src/lib/auth-client.ts"]
             UseSessionHook["useAuthSession Hook<br/>TanStack React Query Cache"]
         end
@@ -38,6 +40,8 @@ graph TD
 
     %% Auth Flows
     LoginUI -->|Invokes signIn/signUp| AuthClient
+    RecoveryUI -->|requestPasswordReset / resetPassword| AuthClient
+    AuthLib -->|Verification & reset links| Mailer
     DashboardUI -->|Verifies SSR Session| AuthLib
     AuthClient -->|HTTP /api/auth/*| APIHandler
     APIHandler --> AuthLib
@@ -73,11 +77,45 @@ sequenceDiagram
     AuthEngine->>Prisma: Create User + Account records
     Prisma->>DB: INSERT into "users", "accounts"
     DB-->>Prisma: Confirm Rows Created
-    AuthEngine->>AuthEngine: Issue signed Session Token
-    AuthEngine-->>RouteHandler: Set HttpOnly Session Cookie
-    RouteHandler-->>AuthClient: 200 OK (User + Session metadata)
-    AuthClient-->>LoginForm: Success
-    LoginForm->>User: Redirects to /dashboard
+    AuthEngine->>AuthEngine: Sign email-verification token (callbackURL=/email-verified)
+    AuthEngine->>AuthEngine: sendVerificationEmail → sendEmail() (dev: console)
+    AuthEngine-->>RouteHandler: No session (requireEmailVerification)
+    RouteHandler-->>AuthClient: 200 OK ({ token: null, user })
+    AuthClient-->>LoginForm: Success without session
+    LoginForm->>User: "Check your email" screen
+    User->>RouteHandler: GET /api/auth/verify-email?token=...
+    RouteHandler->>AuthEngine: Verify token
+    AuthEngine->>DB: UPDATE users SET emailVerified = true
+    AuthEngine-->>User: Session cookie (autoSignInAfterVerification) + redirect /email-verified
+```
+
+Sign-in for an unverified account is rejected with `EMAIL_NOT_VERIFIED`; `LoginForm` then offers
+`authClient.sendVerificationEmail()` as a resend action.
+
+### Password Reset
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User as User / Browser
+    participant Forgot as /forgot-password
+    participant Reset as /reset-password
+    participant RouteHandler as /api/auth/[...all]
+    participant AuthEngine as Better Auth Core
+    participant DB as PostgreSQL
+
+    User->>Forgot: Enters email
+    Forgot->>RouteHandler: POST /api/auth/request-password-reset { email, redirectTo: "/reset-password" }
+    RouteHandler->>AuthEngine: Rate limit check (3 per 5 min per IP)
+    AuthEngine->>DB: INSERT verifications (reset-password:<token>, 1h expiry)
+    AuthEngine->>AuthEngine: sendResetPassword → sendEmail() (dev: console)
+    AuthEngine-->>Forgot: 200 OK (same response whether or not the user exists)
+    User->>RouteHandler: GET /api/auth/reset-password/<token>?callbackURL=/reset-password
+    RouteHandler-->>User: Redirect /reset-password?token=... (or ?error=INVALID_TOKEN)
+    User->>Reset: Enters new password
+    Reset->>RouteHandler: POST /api/auth/reset-password { token, newPassword }
+    AuthEngine->>DB: Consume token, update password hash, delete user sessions
+    Reset->>User: Redirect /login
 ```
 
 ### Server-Side Route Protection (`/dashboard`)
@@ -126,6 +164,10 @@ sequenceDiagram
 | `src/components/ui/`                | Primitive UI components (`Button.tsx`, `Card.tsx`, `Input.tsx`).                                   |
 | `src/app/page.tsx`                  | Production-styled landing page featuring hero section, feature cards, and navigation.              |
 | `src/app/login/page.tsx`            | Dedicated auth page wrapping `LoginForm`.                                                          |
+| `src/app/forgot-password/`          | Requests a password reset email (`ForgotPasswordForm`).                                            |
+| `src/app/reset-password/`           | Consumes the reset token from the query string and sets a new password (`ResetPasswordForm`).      |
+| `src/app/email-verified/`           | Landing page after the email-verification link; shows success or the token error.                  |
+| `src/lib/email.ts`                  | `sendEmail()` abstraction; console transport in development, extension point for a real provider.  |
 | `src/app/dashboard/layout.tsx`      | Server component guard ensuring only authenticated sessions enter `/dashboard`.                    |
 | `src/app/dashboard/page.tsx`        | Authenticated overview screen displaying session claims and active sign-out handler.               |
 | `src/app/globals.css`               | Cyberpunk/slate design tokens, glassmorphism utilities, and gradient definitions.                  |
@@ -172,4 +214,6 @@ sequenceDiagram
 2. **Server-Side Session Guarding**: `src/app/dashboard/layout.tsx` calls `requireAuth()` from `src/lib/session.ts`, which verifies the session against the database — not merely the presence of a cookie — before emitting HTML, mitigating client-side flash-of-unauthenticated-content (FOUC). New protected routes should call the same helper rather than re-implementing the check.
 3. **Reactive Query Invalidation**: Client-side auth mutations invalidate TanStack React Query keys (`["auth", "session"]`), updating the UI state immediately without hard page reloads.
 4. **Environment Isolation**: Server-only secrets (`DATABASE_URL`, `AUTH_SECRET`) live in `config.server.ts`, which is never imported by a client component, keeping them out of the browser bundle. Both that module and the client-safe `config.ts` parse their variables through Zod at import time, so an absent or too-short `AUTH_SECRET` aborts the build instead of silently falling back to Better Auth's development default.
-5. **Aligned Password Policy**: `MIN_PASSWORD_LENGTH` in `config.ts` is consumed by both the Better Auth server config and the sign-up form, so client-side validation cannot drift from the server's floor.
+5. **Email Verification Required**: `emailAndPassword.requireEmailVerification` blocks session creation until the address is verified. Duplicate sign-ups get the same generic response as new ones, so sign-up cannot be used to enumerate accounts; password-reset requests behave the same way.
+6. **Rate Limiting**: Better Auth's built-in `rateLimit` is enabled in all environments with stricter `customRules` for `/sign-in/email`, `/sign-up/email`, `/request-password-reset`, `/reset-password`, and `/send-verification-email`. Storage is in-memory (per process) — switch to database or secondary storage for multi-instance deployments.
+7. **Aligned Password Policy**: `MIN_PASSWORD_LENGTH` in `config.ts` is consumed by both the Better Auth server config and the sign-up form, so client-side validation cannot drift from the server's floor.
